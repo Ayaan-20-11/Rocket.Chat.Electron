@@ -1,12 +1,12 @@
 import path from 'path';
 
-import type { Event } from 'electron';
-import { app, BrowserWindow, dialog, screen } from 'electron';
+import type { Event, Rectangle } from 'electron';
+import { app, BrowserWindow, dialog, screen, nativeTheme } from 'electron';
 import i18next from 'i18next';
 
 import { packageJsonInformation } from '../app/main/app';
 import { handle } from '../ipc/main';
-import { dispatch, listen, select, watch } from '../store';
+import { dispatch, listen, select } from '../store';
 import type { RootState } from '../store/rootReducer';
 import {
   SETTINGS_WINDOW_OPEN_STATE_CHANGED,
@@ -22,16 +22,15 @@ import {
   watchWindowBounds,
 } from '../ui/main/secondaryWindowState';
 import {
+  isRecreatingSecondaryWindow,
+  watchSecondaryWindowTransparency,
+} from '../ui/main/secondaryWindowTransparency';
+import { getRootWindowAppearanceOptions } from '../ui/main/windowAppearance';
+import {
   NOT_FULL_SCREENABLE,
   getTitleBarOptions,
 } from '../ui/windowChrome/appearance';
-import {
-  TRANSPARENCY_CHANNEL,
-  WINDOW_MIN_HEIGHT,
-  WINDOW_MIN_WIDTH,
-  WINDOW_PREFERRED_HEIGHT,
-  WINDOW_PREFERRED_WIDTH,
-} from './constants';
+import { WINDOW_HEIGHT, WINDOW_WIDTH } from './constants';
 
 const t = i18next.t.bind(i18next);
 
@@ -54,8 +53,8 @@ const selectIsTransparencyEnabled = ({
 let pendingCreation: Promise<void> | null = null;
 
 /**
- * Centred on the display nearest the main window, sized for the Appearance
- * section but never larger than the screen it opens on.
+ * Centred on the display nearest the main window, at the fixed window size but
+ * never larger than the screen it opens on.
  */
 const getDefaultBounds = async (): Promise<{
   width: number;
@@ -71,14 +70,8 @@ const getDefaultBounds = async (): Promise<{
     y: winBounds.y + winBounds.height / 2,
   });
 
-  const width = Math.min(
-    actualScreen.workAreaSize.width,
-    WINDOW_PREFERRED_WIDTH
-  );
-  const height = Math.min(
-    actualScreen.workAreaSize.height,
-    WINDOW_PREFERRED_HEIGHT
-  );
+  const width = Math.min(actualScreen.workAreaSize.width, WINDOW_WIDTH);
+  const height = Math.min(actualScreen.workAreaSize.height, WINDOW_HEIGHT);
   const x = Math.round(
     (actualScreen.workArea.width - width) / 2 + actualScreen.workArea.x
   );
@@ -89,35 +82,57 @@ const getDefaultBounds = async (): Promise<{
   return { width, height, x, y };
 };
 
+/**
+ * A saved position may come from a narrower window, so the fixed-size window
+ * could otherwise open partly off the display it was left on.
+ */
+const clampToWorkArea = (
+  { x, y }: { x: number; y: number },
+  width: number,
+  height: number,
+  workArea: Rectangle
+): { x: number; y: number } => ({
+  x: Math.max(workArea.x, Math.min(x, workArea.x + workArea.width - width)),
+  y: Math.max(workArea.y, Math.min(y, workArea.y + workArea.height - height)),
+});
+
 const buildSettingsWindow = async (focusOnShow: boolean): Promise<void> => {
   const { width, height, x, y } = await getDefaultBounds();
 
   // Where the reader last left this window, falling back to centred on the
-  // display nearest the main window.
+  // display nearest the main window. Only the position is restored: the size is
+  // fixed, and a size persisted by an older, resizable build must not win.
   const savedBounds = getSavedWindowBounds('settings');
+  const position = savedBounds
+    ? clampToWorkArea(
+        savedBounds,
+        width,
+        height,
+        screen.getDisplayMatching(savedBounds).workArea
+      )
+    : { x, y };
 
-  // Seeds the first paint only; the renderer then follows the setting live.
+  // Native appearance and the renderer must agree on the first paint.
   const isTransparencyEnabled = isMac && select(selectIsTransparencyEnabled);
 
   settingsWindow = new BrowserWindow({
-    ...(savedBounds ?? { width, height, x, y }),
-    minWidth: WINDOW_MIN_WIDTH,
-    minHeight: WINDOW_MIN_HEIGHT,
+    width,
+    height,
+    ...position,
+    resizable: false,
+    maximizable: false,
     title: 'Settings - Rocket.Chat',
     // The toolbar doubles as the title bar wherever the platform allows it, so
     // the window shows one header instead of a native title bar stacked on an
     // in-app one.
     ...getTitleBarOptions(),
     ...NOT_FULL_SCREENABLE,
-    // `transparent` cannot be toggled after creation, so — like the root window —
-    // the window is always transparent with a vibrancy material on macOS and the
-    // setting only decides whether the renderer paints an opaque surface over it.
     ...(isMac
-      ? {
-          transparent: true,
-          vibrancy: 'sidebar' as const,
-          visualEffectState: 'active' as const,
-        }
+      ? getRootWindowAppearanceOptions({
+          platform: process.platform,
+          isTransparentWindowEnabled: isTransparencyEnabled,
+          shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
+        })
       : {}),
     webPreferences: {
       nodeIntegration: true,
@@ -133,7 +148,7 @@ const buildSettingsWindow = async (focusOnShow: boolean): Promise<void> => {
 
   settingsWindow.once('ready-to-show', () => {
     settingsWindow?.setTitle(
-      `Settings - ${packageJsonInformation.productName}`
+      `${t('settings.title')} - ${packageJsonInformation.productName}`
     );
     if (focusOnShow) {
       settingsWindow?.show();
@@ -145,9 +160,10 @@ const buildSettingsWindow = async (focusOnShow: boolean): Promise<void> => {
 
   dispatch({ type: SETTINGS_WINDOW_OPEN_STATE_CHANGED, payload: true });
 
+  const openedWindow = settingsWindow;
   settingsWindow.on('closed', () => {
     settingsWindow = null;
-    if (!isAppQuitting) {
+    if (!isAppQuitting && !isRecreatingSecondaryWindow(openedWindow)) {
       dispatch({ type: SETTINGS_WINDOW_OPEN_STATE_CHANGED, payload: false });
     }
   });
@@ -247,11 +263,11 @@ export const startSettingsWindowHandler = (): void => {
     }
   );
 
-  // Transparency is a renderer concern here, so a change only needs pushing to
-  // the open window — no reopen, no restart.
-  watch(selectIsTransparencyEnabled, (isEnabled) => {
-    if (!settingsWindow || settingsWindow.isDestroyed()) return;
-    settingsWindow.webContents.send(TRANSPARENCY_CHANNEL, isEnabled);
+  watchSecondaryWindowTransparency({
+    getWindow: () => settingsWindow,
+    reopen: () => createSettingsWindow(false),
+    isQuitting: () => isAppQuitting,
+    waitForCreation: () => pendingCreation,
   });
 
   onWindowBoundsReset('settings', async () => {

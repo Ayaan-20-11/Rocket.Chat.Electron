@@ -1,5 +1,6 @@
 import { Shell } from '.';
-import { renderWithStore, screen } from '../../test-utils';
+import { SETTINGS_SET_IS_TRANSPARENT_WINDOW_ENABLED_CHANGED } from '../../actions';
+import { act, renderWithStore, screen } from '../../test-utils';
 
 jest.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -30,16 +31,6 @@ jest.mock('../ServersView', () => ({
 jest.mock('../AddServerView', () => ({
   __esModule: true,
   AddServerView: () => <div data-testid='add-server-view' />,
-}));
-
-jest.mock('../DownloadsManagerView', () => ({
-  __esModule: true,
-  default: () => <div data-testid='downloads-manager-view' />,
-}));
-
-jest.mock('../SettingsView', () => ({
-  __esModule: true,
-  SettingsView: () => <div data-testid='settings-view' />,
 }));
 
 jest.mock('../TopBar', () => ({
@@ -196,6 +187,41 @@ const setPlatform = (platform: NodeJS.Platform): (() => void) => {
 };
 
 describe('Shell', () => {
+  it.each([false, true])(
+    'keeps macOS transparency=%s until restart, including pending confirmation and Cancel',
+    (initial) => {
+      const restorePlatform = setPlatform('darwin');
+      try {
+        const { store } = renderWithStore(<Shell />, {
+          preloadedState: buildState({ isTransparentWindowEnabled: initial }),
+        });
+        act(() => {
+          store.dispatch({
+            type: SETTINGS_SET_IS_TRANSPARENT_WINDOW_ENABLED_CHANGED,
+            payload: !initial,
+          });
+        });
+        expect(store.getState().isTransparentWindowEnabled).toBe(!initial);
+        expect(screen.getByTestId('global-styles')).toHaveAttribute(
+          'data-transparent',
+          String(initial)
+        );
+        act(() => {
+          store.dispatch({
+            type: SETTINGS_SET_IS_TRANSPARENT_WINDOW_ENABLED_CHANGED,
+            payload: initial,
+          });
+        });
+        expect(screen.getByTestId('global-styles')).toHaveAttribute(
+          'data-transparent',
+          String(initial)
+        );
+      } finally {
+        restorePlatform();
+      }
+    }
+  );
+
   it('renders the layout and its primary views without crashing', () => {
     renderWithStore(<Shell />, { preloadedState: buildState() });
 
@@ -203,8 +229,6 @@ describe('Shell', () => {
     expect(screen.getByTestId('tab-bar')).toBeInTheDocument();
     expect(screen.getByTestId('servers-view')).toBeInTheDocument();
     expect(screen.getByTestId('add-server-view')).toBeInTheDocument();
-    expect(screen.getByTestId('downloads-manager-view')).toBeInTheDocument();
-    expect(screen.getByTestId('settings-view')).toBeInTheDocument();
   });
 
   it('mounts the top-level dialogs', () => {

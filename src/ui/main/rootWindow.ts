@@ -8,6 +8,7 @@ import type {
 } from 'electron';
 import {
   app,
+  autoUpdater,
   BrowserWindow,
   Menu,
   nativeImage,
@@ -22,6 +23,7 @@ import {
   APP_MAIN_WINDOW_TITLE_SET,
 } from '../../app/actions';
 import { setupRootWindowReload } from '../../app/main/dev';
+import { loggers } from '../../logging/scopes';
 import { select, watch, listen, dispatchLocal, dispatch } from '../../store';
 import type { RootState } from '../../store/rootReducer';
 import {
@@ -36,6 +38,9 @@ import type { WindowState } from '../common';
 import { selectGlobalBadge, selectGlobalBadgeCount } from '../selectors';
 import { debounce } from './debounce';
 import { getTrayIconPath } from './icons';
+import { getRootWindowAppearanceOptions } from './windowAppearance';
+
+export { getRootWindowAppearanceOptions } from './windowAppearance';
 
 const webPreferences: WebPreferences = {
   nodeIntegration: true,
@@ -88,9 +93,16 @@ const platformTitleBarStyle =
     : 'default';
 
 const isMac = process.platform === 'darwin';
-// Linux client chrome is a plain rectangle under most WMs. Transparent + CSS
-// radius paints soft outer corners. Windows already gets DWM rounding — leave it.
-const usesLinuxClientChromeRounding = process.platform === 'linux';
+
+const isMacTransparencyEnabled = (): boolean => {
+  if (!isMac) {
+    return false;
+  }
+
+  return select(
+    ({ isTransparentWindowEnabled }) => isTransparentWindowEnabled === true
+  );
+};
 
 export const createRootWindow = (): void => {
   _rootWindow = new BrowserWindow({
@@ -102,20 +114,11 @@ export const createRootWindow = (): void => {
     ...(isMac ? { trafficLightPosition: { x: 12, y: 13 } } : {}),
     show: false,
     webPreferences,
-    ...(isMac
-      ? {
-          transparent: true,
-          vibrancy: 'sidebar',
-          visualEffectState: 'active',
-        }
-      : {}),
-    ...(usesLinuxClientChromeRounding
-      ? {
-          transparent: true,
-          backgroundColor: '#00000000',
-          hasShadow: true,
-        }
-      : {}),
+    ...getRootWindowAppearanceOptions({
+      platform: process.platform,
+      isTransparentWindowEnabled: isMacTransparencyEnabled(),
+      shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
+    }),
   });
 
   // Block navigation to smb:// protocol
@@ -162,7 +165,7 @@ export const isInsideSomeScreen = ({
 
 export const applyRootWindowState = (
   browserWindow: BrowserWindow,
-  { force = false }: { force?: boolean } = {}
+  { force = false, visible }: { force?: boolean; visible?: boolean } = {}
 ): void => {
   const rootWindowState = select(selectRootWindowState);
   const isTrayIconEnabled = select(
@@ -171,11 +174,13 @@ export const applyRootWindowState = (
 
   let { x = null, y = null } = rootWindowState.bounds;
   let { width, height } = rootWindowState.bounds;
+  let isRecentered = false;
   if (
     x === null ||
     y === null ||
     !isInsideSomeScreen({ x, y, width, height })
   ) {
+    isRecentered = true;
     const primaryDisplay = screen.getPrimaryDisplay();
     const { workArea, workAreaSize } = primaryDisplay;
     width = Math.round(workAreaSize.width * 0.9);
@@ -184,6 +189,7 @@ export const applyRootWindowState = (
     y = Math.round(workArea.y + (workArea.height - height) / 2);
   }
   if (browserWindow.isVisible() && !force) {
+    loggers.ui.info('Root window state not applied: window already visible');
     return;
   }
 
@@ -219,13 +225,33 @@ export const applyRootWindowState = (
     browserWindow.setFullScreen(true);
   }
 
-  if (rootWindowState.visible || !isTrayIconEnabled) {
+  const shouldShow = (visible ?? rootWindowState.visible) || !isTrayIconEnabled;
+  if (shouldShow) {
     browserWindow.show();
   }
 
   if (rootWindowState.focused) {
     browserWindow.focus();
   }
+
+  loggers.ui.info(
+    'Root window state applied',
+    JSON.stringify({
+      force,
+      requestedVisible: visible,
+      savedVisible: rootWindowState.visible,
+      savedMinimized: rootWindowState.minimized,
+      savedMaximized: rootWindowState.maximized,
+      savedFullscreen: rootWindowState.fullscreen,
+      savedBounds: rootWindowState.bounds,
+      isTrayIconEnabled,
+      isRecentered,
+      bounds: { x, y, width, height },
+      shown: shouldShow,
+      isVisible: browserWindow.isVisible(),
+      isMinimized: browserWindow.isMinimized(),
+    })
+  );
 };
 
 const fetchRootWindowState = async (): Promise<
@@ -585,7 +611,13 @@ export const setupRootWindow = (): void => {
     );
   }
 
-  app.addListener('before-quit', () => {
+  let isTornDown = false;
+  const tearDown = (): void => {
+    if (isTornDown) {
+      return;
+    }
+    isTornDown = true;
+
     unsubscribers.forEach((unsubscriber) => {
       try {
         unsubscriber();
@@ -593,7 +625,13 @@ export const setupRootWindow = (): void => {
         console.warn('Unsubscriber error during quit:', error);
       }
     });
-  });
+  };
+
+  app.addListener('before-quit', tearDown);
+  // On macOS, quitAndInstall() closes every window before emitting
+  // before-quit, so the close guard has to be released here as well or the
+  // restart into a downloaded update never happens.
+  autoUpdater.addListener('before-quit-for-update', tearDown);
 };
 
 const createRootWindowContextMenu = ({
@@ -666,14 +704,19 @@ export const showRootWindow = async (): Promise<void> => {
 
   return new Promise((resolve) => {
     browserWindow.once('ready-to-show', () => {
-      applyRootWindowState(browserWindow);
-
       const isTrayIconEnabled = select(
         ({ isTrayIconEnabled }) => isTrayIconEnabled
       );
+      const isStartHidden =
+        app.commandLine.hasSwitch('start-hidden') && isTrayIconEnabled;
 
-      if (app.commandLine.hasSwitch('start-hidden') && isTrayIconEnabled) {
-        console.debug('Start application in background');
+      // A launch always opens the window; only --start-hidden keeps it in the
+      // tray. Restoring a hidden state left users with no window and a tray
+      // icon that Windows can bury in the notification-area overflow.
+      applyRootWindowState(browserWindow, { visible: !isStartHidden });
+
+      if (isStartHidden) {
+        loggers.ui.info('Root window hidden at startup by --start-hidden');
         browserWindow.hide();
       }
 

@@ -1,18 +1,16 @@
 import { Box, PaletteStyleTag } from '@rocket.chat/fuselage';
-import { useLayoutEffect } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import { useSelector } from 'react-redux';
 
 import type { RootState } from '../../../store/rootReducer';
 import { AddServerView } from '../AddServerView';
 import { ClearCacheDialog } from '../ClearCacheDialog';
-import DownloadsManagerView from '../DownloadsManagerView';
 import { OutlookCredentialsDialog } from '../OutlookCredentialsDialog';
 import { RootScreenSharePicker } from '../RootScreenSharePicker';
 import { ScreenSharingDialog } from '../ScreenSharingDialog';
 import { SelectClientCertificateDialog } from '../SelectClientCertificateDialog';
 import { ServerInfoModal } from '../ServerInfoModal';
 import { ServersView } from '../ServersView';
-import { SettingsView } from '../SettingsView';
 import { SupportedVersionDialog } from '../SupportedVersionDialog';
 import { TabBar } from '../TabBar';
 import { MeatballMenuButton } from '../TabBar/MeatballMenuButton';
@@ -38,6 +36,12 @@ export const Shell = () => {
   const isTransparentWindowEnabled = useSelector(
     ({ isTransparentWindowEnabled }: RootState) => isTransparentWindowEnabled
   );
+  // Match the immutable native root window until the confirmed restart.
+  const startupTransparency = useRef(isTransparentWindowEnabled);
+  const appliedTransparency =
+    process.platform === 'darwin'
+      ? startupTransparency.current
+      : isTransparentWindowEnabled;
   const navigationLayout = useSelector(
     ({ navigationLayout }: RootState) => navigationLayout
   );
@@ -70,12 +74,12 @@ export const Shell = () => {
         selector=':root'
         // tagId='sidebar-palette'
       />
-      <GlobalStyles isTransparentWindowEnabled={isTransparentWindowEnabled} />
+      <GlobalStyles isTransparentWindowEnabled={appliedTransparency} />
       {navigationLayout !== 'tabs' && process.platform === 'darwin' && (
         <WindowDragBar />
       )}
       <Box
-        bg={isTransparentWindowEnabled ? 'transparent' : 'surface-neutral'}
+        bg={appliedTransparency ? 'transparent' : 'surface-neutral'}
         display='flex'
         flexWrap='nowrap'
         height='100%'
@@ -104,6 +108,7 @@ export const Shell = () => {
         {navigationLayout === 'tabs' &&
           (process.platform === 'win32' || process.platform === 'linux') && (
             <TabBar
+              isTransparentWindowEnabled={appliedTransparency}
               leadingSlot={
                 <>
                   <MeatballMenuButton />
@@ -117,6 +122,7 @@ export const Shell = () => {
         {/* macOS tabs: system traffic lights; meatball/downloads/update trail. */}
         {navigationLayout === 'tabs' && process.platform === 'darwin' && (
           <TabBar
+            isTransparentWindowEnabled={appliedTransparency}
             trailingSlot={
               <>
                 <UpdateLabel />
@@ -159,6 +165,7 @@ export const Shell = () => {
         <Box display='flex' flexDirection='row' flexGrow={1}>
           {navigationLayout === 'sidebar' && (
             <TabBar
+              isTransparentWindowEnabled={appliedTransparency}
               orientation='vertical'
               trailingSlot={<MeatballMenuButton orientation='vertical' />}
             />
@@ -183,8 +190,6 @@ export const Shell = () => {
           >
             <ServersView />
             <AddServerView />
-            <DownloadsManagerView />
-            <SettingsView />
           </Box>
         </Box>
       </Box>

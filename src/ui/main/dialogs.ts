@@ -6,6 +6,23 @@ import { getRootWindow } from './rootWindow';
 
 const t = i18next.t.bind(i18next);
 
+export const askForTransparencyRestart = async (): Promise<boolean> => {
+  const { response } = await dialog.showMessageBox(await getRootWindow(), {
+    type: 'question',
+    title: t('dialog.transparencyRestart.title'),
+    message: t('dialog.transparencyRestart.message'),
+    buttons: [
+      t('dialog.transparencyRestart.restartNow'),
+      t('dialog.transparencyRestart.cancel'),
+    ],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+
+  return response === 0;
+};
+
 export const askForAppDataReset = async (
   parentWindow?: BrowserWindow
 ): Promise<boolean> => {
@@ -43,6 +60,51 @@ export const askForServerAddition = async (
   );
 
   return response === 0;
+};
+
+export const askForUiOverride = async (
+  serverUrl: string,
+  bundleUrl: string,
+  parentWindow?: BrowserWindow
+): Promise<boolean> => {
+  parentWindow?.show();
+
+  const { response } = await dialog.showMessageBox(
+    parentWindow ?? (await getRootWindow()),
+    {
+      type: 'warning',
+      buttons: [t('dialog.uiOverride.load'), t('dialog.uiOverride.cancel')],
+      defaultId: 1,
+      cancelId: 1,
+      title: t('dialog.uiOverride.title'),
+      message: t('dialog.uiOverride.message', { host: serverUrl }),
+      detail: t('dialog.uiOverride.detail', { bundle: bundleUrl }),
+    }
+  );
+
+  return response === 0;
+};
+
+export const warnAboutUiOverrideRequiresDeveloperMode = async (
+  parentWindow?: BrowserWindow
+): Promise<void> => {
+  await dialog.showMessageBox(parentWindow ?? (await getRootWindow()), {
+    type: 'info',
+    title: t('dialog.uiOverride.title'),
+    message: t('dialog.uiOverride.developerModeRequired'),
+  });
+};
+
+export const warnAboutUiPreviewFailure = async (
+  reason: string,
+  parentWindow?: BrowserWindow
+): Promise<void> => {
+  await dialog.showMessageBox(parentWindow ?? (await getRootWindow()), {
+    type: 'error',
+    title: t('dialog.uiOverride.title'),
+    message: t('dialog.uiOverride.failed'),
+    detail: reason,
+  });
 };
 
 export const warnAboutInvalidServerUrl = (

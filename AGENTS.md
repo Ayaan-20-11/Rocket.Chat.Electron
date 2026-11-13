@@ -1,431 +1,260 @@
-# Agent Instructions
+# Rocket.Chat Desktop
 
-These instructions apply to the repository root. More specific `AGENTS.md`
-files in subdirectories override or extend this file. This is the canonical
-guidance file for all coding agents (Codex, Claude Code, Cursor, Hermes,
-GitHub agents, etc.) — `CLAUDE.md` imports it and adds only Claude-specific
-content, if any.
+The Electron app for Rocket.Chat. Main-process code lives in
+`src/<module>/main/`, renderer code in the other `src/<module>/` folders, and
+the release GitHub Action in `workspaces/desktop-release-action/`.
 
-## Project Basics
+This file is the guide for every coding agent: Claude Code, Codex, Cursor,
+Hermes, GitHub agents and others. It holds the core rules, the traps that an
+agent cannot know to look up, and the documentation index. The full rules of
+each topic live in a doc under `docs/`. An `AGENTS.md` file in a subdirectory
+adds rules for the files under it.
 
-- TypeScript codebase. Use TypeScript strict mode for all new code unless
-  explicitly told otherwise.
-- Run root commands from the repository root. Do not run `yarn build` inside
-  workspace directories — it creates incorrect output structures. Always use
-  root commands.
-- Common commands:
+The repository has no `CLAUDE.md` on purpose. Claude Code 2.1.277 and later
+reads `AGENTS.md` only when no `CLAUDE.md` exists, so a root `CLAUDE.md` hides
+this file. Do not add `CLAUDE.local.md` or `.claude/CLAUDE.md` either, because
+Claude Code can also skip this file when one of them exists. When a request says "add this to CLAUDE.md", add it here or to the
+matching doc. If a tool creates a root `CLAUDE.md`, move its useful content
+here and remove it. Claude-specific configuration lives in `.claude/` (skills,
+agents, hooks, `settings.json`).
+
+## Commands
 
 ```sh
 yarn install && yarn start   # Dev mode
 yarn build                   # Rollup compile to app/
 yarn lint && yarn test       # Lint + test
+yarn test <path>             # One spec (never a bare npx jest)
 yarn workspaces:build        # Build all workspaces
 ```
 
-- After building `desktop-release-action`, remove the nested dist:
-  `rm -rf workspaces/desktop-release-action/dist/dist` — the action only
-  needs `workspaces/desktop-release-action/dist/index.js`.
-- `app/` mirrors `src/public` (the `syncPublicAssets()` rollup plugin):
-  files removed from `src/public` are purged from `app/` on build, and
-  `yarn start`'s watcher rebuilds/relaunches when `src/public` assets change.
+Run `yarn` commands from the repository root. Never run `yarn build` inside a
+workspace directory, because it writes an incorrect output structure.
 
-## Branching Model
+## Writing code here
 
-- `dev` is the default branch. ALL feature and fix PRs target `dev` and are
-  squash-merged.
-- `master` holds only released code. It advances only via a `dev`→`master`
-  release PR merged with a true merge commit (`gh pr merge --merge`) —
-  NEVER squash a release PR; squashing forks history permanently.
-- `release/X.Y.x` branches are patch lines for a shipped stable version.
-  Fixes land on `dev` first and are cherry-picked onto the release branch.
-  A hotfix authored directly on a release branch must be forward-ported to
-  `dev` immediately via a cherry-pick PR.
-- Never back-merge `master` or a `release/X.Y.x` branch into `dev`.
-- Tags are created only via `yarn release:tag` (channel-aware guard).
-  Release builds trigger on semver tag pushes only and always produce a
-  draft release for a human to review and publish. `build-release.yml` is a
-  `prepare` job (creates the draft) plus seven parallel packaging jobs; only
-  ONE job per platform may set `upload_update_metadata: 'true'` (nsis, dmg,
-  AppImage) — the `latest*.yml` a job uploads lists only the files that job
-  built, so a second uploader replaces it with a partial list and breaks
-  auto-update. `workflow_dispatch` on that workflow is a signed dry run with
-  no release; use it before trusting a workflow/action change with a tag.
-  The release action reads `mode`, `targets` and `upload_update_metadata`
-  inputs (`workspaces/desktop-release-action/action.yml`).
-- Version invariant: `package.json` on `dev` always equals the newest tag
-  cut from `dev`'s own line (the first alpha of a new cycle bumps straight
-  to `X.(Y+1).0-alpha.1`).
-- Details: `docs/development-and-release-flow.md` (conceptual overview),
-  `docs/release-process.md` (exact commands).
+- Write all new code in TypeScript strict mode, unless the request says
+  otherwise. Follow the Rocket.Chat
+  [TypeScript conventions](https://github.com/RocketChat/Rocket.Chat/blob/develop/docs/frontend/typescript-conventions.md):
+  `import type` for an import used only as a type, `unknown` instead of
+  `any`, and no class used only as a namespace.
+- A comment states the **intent** of a function, never the mechanism. A
+  comment never explains code that lives in another file. Full rules:
+  [docs/code-comments.md](docs/code-comments.md).
+- Each pull request carries one classification and one concern, and it can be
+  reverted alone. Fixes and enabling refactors are their own commits, below
+  the feature, also in a proof of concept. Title the pull request after what
+  changes, not after how the code does it. Full rules:
+  [docs/change-organization.md](docs/change-organization.md).
+- Keep every name that a preload exposes to the web client
+  (`RocketChatDesktop`, `videoCallWindow` and their methods) backward
+  compatible. A rename adds the new name and keeps the old name as an alias of
+  the same object. Remove an old name only when no supported server version
+  reads it. Users do not update the desktop app and the server together.
+  Removing `videoCallWindow` in 4.18.0 broke leaving a call on Rocket.Chat
+  8.9.0 (DMV2-32).
+- Use React functional components with hooks. A hook that attaches a listener
+  or an observer to a DOM node returns a callback ref, not a `RefObject`
+  parameter
+  ([why](https://github.com/RocketChat/Rocket.Chat/blob/develop/docs/frontend/dom-hooks.md)).
+- Redux actions follow the FSA (Flux Standard Action) shape.
+- File names: camelCase for files, PascalCase for components.
+- Prefer an edit to an existing file over a new abstraction. Add an
+  abstraction only when it removes real complexity or matches an existing
+  pattern.
 
-## Patches And Builds
+## Git and worktrees
 
-- Do not confuse the two patch systems:
-  - Yarn patch protocol: `.yarn/patches/`, currently for `@ewsjs/xhr`
-    (configured in `package.json`).
-  - `patch-package`: `patches/`, currently for `@kayahr/jest-electron-runner`.
-- Never add `@ewsjs/xhr` patches to `patches/`; that creates CI conflicts.
-- The `desktop-release-action`'s dev/snapshot code paths (`releaseDevelopment`
-  / `releaseSnapshot`) are intentionally dead — do not rebuild its `dist/`
-  bundle just to remove them.
-- Windows builds must include all architectures: `x64`, `ia32`, and `arm64`.
-- Code signing uses Google Cloud KMS in two phases:
-  1. Build packages without signing (empty env vars).
-  2. Sign built packages using `jsign` with Google Cloud KMS.
+- Commit or push only when the user explicitly asks for it. "Fix this" does
+  NOT mean "commit it". Show what you will commit before you commit.
+- Never commit directly to `master`, `dev` or `release/X.Y.x`. Create a
+  branch, test, and open a PR. Read-only git operations need no permission.
+- Work in a worktree, so that you do not disturb another working directory.
+  To continue an existing branch, check out that branch in the worktree. If
+  another worktree already has that branch, work in that worktree. Run
+  `git status` there first. If it has uncommitted changes that are not yours,
+  ask the user before you edit. Start
+  a new branch from the current remote `dev`, because a local `dev` can be
+  stale:
 
-  This prevents MSI build failures from KMS CNG provider conflicts.
-- `electron-builder.json`'s `mac.bundleVersion` (macOS `CFBundleVersion`) is
-  independent from `package.json`'s `version` and must be bumped on every
-  release that ships to the App Store / gets notarized — Apple requires each
-  submission's `CFBundleVersion` to strictly increase over the last one.
-  Format: `YYMM` + a single-digit build counter that resets to `0` at the
-  start of each month, e.g. the first build shipped in August 2026 is
-  `26080`, the second same-month build is `26081`. Check the current value
-  and the date of its last bump (`git log -p --follow -- electron-builder.json`)
-  before incrementing — do not guess an arbitrary increment.
-- `yarn build-assets` re-encodes every PNG/ICO it touches, including ones
-  whose source did not change; commit only the assets whose SVG/component
-  changed and `git checkout --` the rest (byte noise otherwise floods the
-  diff).
+  ```bash
+  mkdir -p ../Rocket.Chat.Electron-worktrees
+  git fetch origin dev
+  git worktree add ../Rocket.Chat.Electron-worktrees/feature-name -b new-branch origin/dev
+  ```
 
-## Releases And Tagging
+- `dev` is the default branch. Feature and fix PRs target `dev`, and they are
+  squash-merged. A `dev`→`master` or `release/X.Y.x`→`master` PR is merged
+  with a true merge commit (`gh pr merge --merge`). NEVER squash it, because a
+  squash forks the history permanently. Never back-merge `master` or a release
+  branch into `dev`. Details:
+  [docs/development-and-release-flow.md](docs/development-and-release-flow.md).
 
-- **Always create release tags with `yarn release:tag`** — never hand-rolled
-  `git tag` + `git push`. The script (`scripts/release-tag.ts`) reads the
-  version from `package.json`, fetches the refs allowed for that version's
-  channel, and fails closed (exit 1) on every unsafe case. Tagging by hand
-  skips all of it.
-- Which remote refs are allowed depends on the channel: prerelease tags
-  (alpha/beta/rc — any version with a prerelease id) must have HEAD as an
-  ancestor of `origin/dev` or any `origin/release/*` branch; stable tags
-  (no prerelease id) must have HEAD as an ancestor of `origin/master` or any
-  `origin/release/*` branch. `origin/release/*` branches are discovered via
-  `git ls-remote --heads origin 'release/*'` at run time.
-- Guards, and how to override each:
+## Traps
 
-  | Guard | Override |
-  |---|---|
-  | Invalid semver in `package.json` | none |
-  | HEAD not an ancestor of an allowed ref for its channel | `--allow-unverified-ref` |
-  | Tag already exists | none — not even `--force` |
-  | Version not greater than latest tag **in its channel** | `--force` |
+Each rule below prevents a mistake that already happened. Read the linked doc
+before you work in that area.
 
-- Channel (stable / alpha / beta / candidate) is detected from the version and
-  compared only within itself, so an alpha never blocks a stable or vice versa.
-- Flags: `--yes` / `-y` skips the confirmation prompt (also skipped
-  automatically when `CI=true`); `--help` lists everything. Without `--yes` the
-  prompt reads a real TTY, so piping `echo y` is unreliable — use the flag.
-- Tag the **squashed merge/bump commit on the branch the channel expects**
-  (dev for prereleases; master, or a `release/X.Y.x` branch for patch
-  releases, for stables), never a pre-merge bump commit on an unmerged
-  branch — that ships the wrong tree. The ref-ancestor guard enforces this;
-  if it fires, fix the checkout rather than overriding it.
-- A fresh worktree has no `node_modules`, so the script dies with
-  `Couldn't find the node_modules state file (findPackageLocation)`. Run
-  `yarn install` in the worktree — never work around it by tagging by hand.
-- If a guard fires, treat it as a real finding: report it and fix the cause.
-  Do not reach for `--force` or `--allow-unverified-ref` without the
-  release owner explicitly agreeing.
-- Tag names are the bare version (`4.16.0`, no `v` prefix). `build-release.yml`
-  triggers on any tag push, and the auto-updater feed derives from
-  `package.json`'s version, which MUST match the tag.
-- Pure tag/channel logic lives in `scripts/releaseTag.lib.ts` and is unit
-  tested (`scripts/releaseTag.lib.spec.ts`); `release-tag.ts` keeps the I/O.
-  Script specs run under their own Jest project (`testEnvironment: 'node'`).
-- The full end-to-end flow (notes, bump PR, merge, tag, CI, asset matrix, Jira
-  release sync) is driven by the `ship-release` skill.
+- **Release tags**: create them only with `yarn release:tag`, never with a
+  manual `git tag`. Treat a guard that fires as a real finding. Use `--force`,
+  `--allow-unverified-ref` or `--allow-missing-translations` only when the
+  release owner explicitly agrees. The translation guard blocks a release when
+  a new English key has no value in a loaded locale.
+  [docs/release-process.md](docs/release-process.md)
+- **Dependency patches**: put each patch in the system that already owns its
+  package (`.yarn/patches/` or `patches/`). Never add an `@ewsjs/xhr` patch to
+  `patches/`. [docs/build-and-packaging.md](docs/build-and-packaging.md)
+- **Windows builds** include all three architectures: `x64`, `ia32` and
+  `arm64`. [docs/build-and-packaging.md](docs/build-and-packaging.md)
+- **Specs**: the location of a spec decides which Jest project runs it, and a
+  flat `src/<module>/*.spec.ts` file never runs. Make each spec pass on
+  Windows, macOS and Linux. Do not change the Jest runner or transformer
+  without reading the CI speed rules.
+  [docs/testing.md](docs/testing.md)
+- **UI changes** need a runtime check or a screenshot, because component
+  tests cannot see paint. Use the `dev-app-verify` skill.
+  [docs/testing.md](docs/testing.md)
+- **Fuselage**: do not pass a `Box` styling prop (`margin*`, `width`,
+  `flexGrow`, `color` and others) to a component other than `Box`. Fuselage
+  1.0 rejects these props.
+  [docs/desktop-ui-guidelines.md](docs/desktop-ui-guidelines.md)
+- **Windows notifications**: never tie reply state to a `close` or dismiss
+  signal. The Action Center card stays repliable after `close`.
+  [docs/windows-notifications.md](docs/windows-notifications.md)
+- **Web client events**: before you change code that reads them, run
+  `yarn probe:web-signals`. Never read `Custom_Script_On_Logout`.
+  [docs/testing.md](docs/testing.md#web-client-events)
+- **Screen capture** cannot be tested in a software-rendered VM.
+  [docs/testing.md](docs/testing.md#screen-capture-needs-hardware-gl)
+- **Startup**: judge the tray only after `yarn start` prints
+  `waiting for changes`. [docs/startup-debugging.md](docs/startup-debugging.md)
 
-## UI Work
+## Documentation index
 
-- Use Fuselage components from `@rocket.chat/fuselage` for UI work unless the
-  design requires something Fuselage does not provide.
-- Check `Theme.d.ts` for valid color tokens before using Fuselage colors.
-- Reference: [Fuselage Storybook](https://rocketchat.github.io/fuselage) and
-  [Rocket.Chat main repo](https://github.com/RocketChat/Rocket.Chat) for usage
-  patterns.
-- Verify library props, APIs, and tokens against official docs or local
-  `.d.ts` files instead of assuming.
-- Before styling tab bar/titlebar controls, custom SVG artwork, or picking
-  color/animation tokens, read `docs/desktop-ui-guidelines.md` — token
-  semantics and traps, Fuselage geometry/timing facts, the button-dimming and
-  SVG transform-origin pitfalls, and layout rules learned in PRs #3441/#3443.
-- Tray icons are status-only by default on macOS, Windows and Linux: six
-  states per platform — `default`, `presence-{online,away,busy,offline}`,
-  `disconnected` (`src/ui/main/icons.ts`). The unread count lives on the
-  Windows taskbar overlay (`rootWindow.ts` `setOverlayIcon`), the macOS
-  menu-bar title and the Linux tray tooltip. The opt-in
-  `isTrayIconUnreadCounterEnabled` setting (#3484) swaps presence for the
-  pre-4.17 badge assets (`notification-{dot,1..9,plus-9}`,
-  `notificationTemplate` on macOS; regenerate with
-  `yarn build-assets --unread-counter`); disconnected still wins. The
-  macOS-only `isMenuBarUnreadCountEnabled` setting (CORE-2703, default on)
-  hides the menu-bar title number; the Dock badge is unaffected.
-- Presence bullets reuse Fuselage `StatusBullet` glyphs
-  (`src/ui/icons/PresenceBullet.tsx`: filled / clock cut-out / bar cut-out /
-  hollow ring; `DisconnectedBadge.tsx`: filled amber with a bold `!`). Any
-  overlay with transparent cut-outs or a hollow shape MUST pass `AppIcon`'s
-  `cutout` prop (`PresenceBulletCutout`), otherwise the rocket shows through
-  the holes.
-- Tray-menu bullet icons are 12pt assets under `src/public/images/presence/`
-  (regenerate with `yarn build-assets --presence-menu-icons`), matching
-  Fuselage's 12px bullet next to 14px text.
+Read the doc that matches the task. Do not scan `docs/` wholesale.
 
-## Testing
+### Code and changes
 
-- Renderer specs use `*.spec.ts` / `*.spec.tsx`.
-- Main-process specs use `*.main.spec.ts`.
-- Renderer specs must live in a Jest-matched nested path, for example
-  `src/<module>/<subdir>/*.spec.ts(x)` or
-  `src/<module>/renderer.spec.ts(x)`. Flat `src/<module>/*.spec.ts` files are
-  not discovered by the current `testMatch`.
-- Verify new specs with `yarn test --listTests --runTestsByPath <file>` when
-  discovery is uncertain.
-- Uses `@kayahr/jest-electron-runner` for Electron environment simulation.
-  It forces `--maxWorkers=1` and spawns one Electron process per spec file,
-  so the only CI parallelism is cross-job `--shard`; after the transform fix
-  that spawn is most of each shard's ~3 min. Do NOT reach for more workers,
-  runner classes or a faster transformer to cut that floor.
-- ts-jest runs transpile-only (`tsconfig: { isolatedModules: true }` inline
-  in `jest.config.js`, `tsconfig.json` untouched). Do NOT switch back to
-  `preset: 'ts-jest'`: the default builds a type-checking Program per spec
-  file and CI has no warm Jest cache, which made the Test step 4× slower.
-  Type errors in specs are caught by `tsc --noEmit` in `yarn lint`.
-- Do NOT switch the transformer to `@swc/jest` without first fixing the two
-  spec patterns it breaks: assigning onto `require(mod).fn` (swc emits
-  read-only getters) and reading a `const` inside a `jest.mock` factory
-  (swc's hoisting hits the temporal dead zone). Measured gain is ~20 s per
-  shard. Story: `docs/postmortem-validate-pr-ci-speed.md`.
-- `jest.config.js` excludes 18 preload/renderer specs under `--coverage`.
-  Keep at least one CI leg running plain `yarn test` (today: windows and
-  macos shards) or those specs gate nothing.
-- validate-pr runs the ubuntu shards on `ubuntu-24.04-arm`. Cache keys MUST
-  include `runner.arch` (both arches report `runner.os == Linux`), and the
-  test job sets `PUPPETEER_SKIP_DOWNLOAD` because puppeteer's postinstall has
-  no arm64 Linux Chromium; puppeteer is only used by `yarn build-assets`.
-- Before blaming CI runners for a slowdown, pull per-step timings
-  (`gh run view <id> --json jobs`) across months. In Sep 2026 the Windows
-  Test step had gone from 1 min to 27 min purely from suite growth plus
-  per-file type-checking; runners were unchanged.
-- Tests run on Windows, macOS, and Linux CI — always verify cross-platform
-  behavior.
-- UI changes need runtime/visual verification — component tests cannot see
-  paint (a clipped SVG passes every DOM assertion). Use the `dev-app-verify`
-  skill (`skills/dev-app-verify/SKILL.md`) to drive and screenshot the running
-  `yarn start` app via the port-9339 inspector, and the Developer Mode menu
-  items (`Simulate Update Flow` / `Simulate Download` / `Simulate
-  Disconnected`) to exercise the flows without real downloads/updates.
-  `Simulate Disconnected` is a Developer menu checkbox that forces the active
-  workspace's presence connection to `disconnected` read-side only — the real
-  connection stays up — so the disconnected tray icon and menu line can be
-  checked without dropping the network.
-- Screen-capture / WebRTC / portal behavior CANNOT be validated in
-  software-rendered VMs — Chromium gates the PipeWire capture path on
-  hardware GL (the gate moves between Electron versions). Validate on
-  hardware GL (GPU passthrough or physical machine) and prefer dbus-level
-  assertions (`org.freedesktop.portal.ScreenCast` requests) over dialog
-  visibility, which is portal/boot-state flaky. Full story:
-  `docs/postmortem-screen-picker-startup-enumeration.md`
-- Prefer optional chaining and fallbacks for platform-specific APIs:
+- [docs/code-comments.md](docs/code-comments.md) — what a comment may say,
+  and where the reasoning goes when it is not a comment.
+- [docs/change-organization.md](docs/change-organization.md) — one concern per
+  pull request, PR titles, fixes → refactors → feature as a stack, and
+  rebasing a stack after a squash merge.
+- [docs/testing.md](docs/testing.md) — where specs live, how to run them,
+  cross-platform specs, runtime UI checks, the web client events, and the
+  Jest and CI speed rules. Read it before you add a spec or change the test
+  setup.
+- [docs/COVERAGE.md](docs/COVERAGE.md) — how coverage is measured, the
+  coverage history, and spec gotchas.
+- [docs/desktop-ui-guidelines.md](docs/desktop-ui-guidelines.md) — Fuselage
+  tokens, geometry and the 1.0 styling-prop rule, tab bar and titlebar
+  controls, SVG pitfalls, and the tray, menu-bar and presence icons. Read it
+  before you style a control, draw an SVG or change an icon.
+- [qa/AGENTS.md](qa/AGENTS.md) — read it before you create or change a QA
+  asset under `qa/`. For a QA pass on a PR, branch or release candidate,
+  follow [skills/desktop-qa-flows/SKILL.md](skills/desktop-qa-flows/SKILL.md).
 
-```typescript
-// PREFERRED — works on all platforms without mocks
-const uid = process.getuid?.() ?? 1000;
-const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`;
-```
+### Build and release
 
-  Only mock when defensive coding isn't possible. Linux-only APIs requiring
-  this: `process.getuid()`, `process.getgid()`, `process.geteuid()`,
-  `process.getegid()`.
+- [docs/build-and-packaging.md](docs/build-and-packaging.md) — the build,
+  `src/public` and `app/`, the two patch systems, `yarn build-assets`, code
+  signing, and `mac.bundleVersion`.
+- [docs/development-and-release-flow.md](docs/development-and-release-flow.md)
+  — branch roles (`dev`, `master`, `release/X.Y.x`), and how a change reaches
+  a release.
+- [docs/release-process.md](docs/release-process.md) — the exact release
+  commands, the `yarn release:tag` guards, the alpha, stable and patch
+  procedures, the release workflow, and channel switching. The `ship-release`
+  skill drives the whole flow.
+- [docs/RENEW_CI_CREDENTIALS.md](docs/RENEW_CI_CREDENTIALS.md) — rotating
+  expired publishing credentials of the build workflows.
+- [docs/qa-alpha-update-testing.md](docs/qa-alpha-update-testing.md) —
+  testing the alpha update flow.
 
-## Windows Notifications
+### Subsystems
 
-- A Windows Action Center card stays repliable indefinitely, and Electron emits
-  the JS `close` event when the banner times out
-  (`NotificationDismissed(should_destroy=false)`). Calling `close()` on the
-  instance does NOT remove the card. Do NOT tie per-notification state — reply
-  routing, target webContents, preload event handlers — to a `close` or dismiss
-  signal, or replies typed later are dropped. Keep it (bounded) until the app
-  decides the notification is finished.
-- The web client auto-closes every desktop notification 10s after showing it
-  (`useNotification.ts`; the server never sends `duration`, so the fallback is
-  always used). Expect that close to arrive while the card is still on screen.
-- Only reply and action-button interactions carry activation arguments
-  (`type=...&tag=<id>`, read via `Notification.handleActivation`, win32).
-  A click on the toast body carries none and arrives ONLY as the instance
-  `click` event — keep that listener unconditional.
-- `Notification.handleActivation` REPLACES the stored callback rather than
-  adding one. A debug probe that registers its own handler silently
-  unregisters the app's — do not use it to observe production behavior.
-- Enter does NOT submit a toast reply; only the toast's Reply button does, and
-  the card closes on submit whether or not the app received anything. Assert
-  replies by querying the server for the message, never by watching the UI.
-- Log dropped activations through `loggers.notifications`
-  (`src/logging/scopes.ts`). `console.warn` from the main process is invisible
-  in packaged builds, which makes a dropped reply untraceable in the field.
-- Full investigation history:
-  `docs/postmortem-notification-quick-reply-sup-1097.md`.
+- [docs/windows-notifications.md](docs/windows-notifications.md) — Windows
+  toast and Action Center behavior, and the rules that keep quick replies
+  working.
+- [docs/startup-debugging.md](docs/startup-debugging.md) — dev mode
+  relaunches, the webview boot signals, the boot wedge and render storms.
+- [docs/supported-versions-flow.md](docs/supported-versions-flow.md) — how
+  the app fetches, caches and applies server version support data.
+- [docs/video-call-window-flow.md](docs/video-call-window-flow.md) — the
+  video call window, and how the other video call docs fit together:
+  [management](docs/video-call-window-management.md),
+  [screen sharing](docs/video-call-screen-sharing.md) and the
+  [Windows Graphics Capture stall](docs/video-call-window-wgc-limitations.md).
+- [docs/linux-display-server.md](docs/linux-display-server.md) — Wayland and
+  X11 detection and fallback on Linux.
 
-## Startup Debugging
+### Deployment guides for administrators
 
-- `yarn start` relaunches Electron once per rollup bundle for the first
-  ~60 s (each `writeBundle` restarts the app), so the tray/menu-bar icon
-  flickers or is absent until `waiting for changes` prints. Judge tray state
-  only after that, and `pkill` orphaned worktree Electrons first — a
-  leftover instance keeps port 9339 and shows a second menu-bar icon.
+- [docs/enterprise-deployment.md](docs/enterprise-deployment.md) — installer
+  choice, and deployment with Active Directory, SCCM/MECM, Intune and Group
+  Policy.
+- [docs/silent-installation.md](docs/silent-installation.md) — unattended
+  installation on each supported OS.
+- [docs/corporate-certificate-configuration.md](docs/corporate-certificate-configuration.md)
+  — servers with certificates that the system does not trust by default.
+- [docs/windows-default-app-associations.md](docs/windows-default-app-associations.md)
+  — making the app the `tel:` and `callto:` handler on Windows fleets.
 
-## QA Flow Authoring
+### Incidents
 
-When creating or updating QA assets under `qa/`, read these first:
+- [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) — documented platform and
+  library traps, with status and workarounds.
+- [docs/postmortem-webview-boot-wedge.md](docs/postmortem-webview-boot-wedge.md)
+  — a workspace webview that never finishes booting.
+- [docs/postmortem-notification-quick-reply-sup-1097.md](docs/postmortem-notification-quick-reply-sup-1097.md)
+  — Windows quick replies that never reached the room.
+- [docs/postmortem-supported-versions-race.md](docs/postmortem-supported-versions-race.md)
+  — the "unsupported version" screen on the first launch after an update.
+- [docs/postmortem-screen-picker-sandbox-detection.md](docs/postmortem-screen-picker-sandbox-detection.md)
+  and
+  [docs/postmortem-screen-picker-startup-enumeration.md](docs/postmortem-screen-picker-startup-enumeration.md)
+  — the Linux screen-share picker that opened at each launch.
+- [docs/linux-wayland-bug-postmortem.md](docs/linux-wayland-bug-postmortem.md)
+  — the crash when the environment suggests Wayland but no compositor runs.
+- [docs/postmortem-msi-disable-auto-updates.md](docs/postmortem-msi-disable-auto-updates.md)
+  — the `DISABLE_AUTO_UPDATES=1` MSI property for SCCM/MECM and Intune.
+- [docs/postmortem-validate-pr-ci-speed.md](docs/postmortem-validate-pr-ci-speed.md)
+  — `validate-pr` from 34 to 5 minutes.
 
-- `skills/desktop-qa-flows/SKILL.md` when the task is for a Desktop PR, branch,
-  or release-candidate QA pass. This file is plain Markdown and can be used by
-  any agent, including Codex, Claude, Hermes, Cursor, and GitHub agents, when
-  explicitly pointed to it. It decides whether to update existing flows, add
-  new flows, or create a new `qa/<feature-slug>/` pack based on changed
-  user-visible risk.
-- `qa/README.md`
-- `qa/AGENTS.md`
-- `qa/flow-template.md`
+## Working principles
 
-QA flows must be executable by a QA engineer or visual agent that knows nothing
-about the feature. Do not guess where UI lives. Derive every user-facing step
-from the implementation, not product intuition: changed React components,
-Fuselage icons, i18n labels, menu definitions, modal buttons, platform
-branches, tests, and helper pages.
-
-For branch-specific QA packs, lock the comparison range before deriving flows:
-record the base branch, head branch or commit, and whether the whole requested
-range was reviewed. Do not claim complete QA coverage for a partial review.
-Classify changed Desktop surfaces by user-visible risk — Electron main
-process, protocol handlers, OS default handlers, settings UI, menus, modals,
-packaging/installers, startup, shortcuts, workspace routing, i18n, and layout
-— then turn each risk into a falsifiable hypothesis the flow proves or
-disproves. Prefer the smallest useful proof: existing tests, targeted tests,
-local UI repro, OS-level repro, or code-path proof when runtime validation is
-not practical.
-
-Write the visible path directly in the flow step `Action` cell. Do not create
-separate navigation sections or ask testers to open another file for basic UI
-discovery. Include screen region, relative position, icon shape, nearby UI,
-visible labels after interaction, and the visual confirmation state. If a
-label only appears as a tooltip or after clicking a menu, describe the visible
-anchor first.
-
-For Qase compatibility, keep the flow table columns aligned with
-`qa/flow-template.md` and validate QA packs with:
-
-```sh
-node qa/scripts/validate-flows.mjs qa/<pack>
-node qa/scripts/export-qase-csv.mjs qa/<pack>
-```
-
-## Code Style
-
-- TypeScript strict mode.
-- React functional components with hooks.
-- Redux actions follow FSA (Flux Standard Action) shape.
-- File naming: camelCase for files, PascalCase for components.
-- No unnecessary comments — self-documenting code through clear naming.
-- Prefer editing existing files over creating new abstractions unless the new
-  abstraction removes real complexity or matches an existing pattern.
-
-## Git And Verification
-
-- Never commit or push without explicit user permission — "fix this" does NOT
-  mean "commit it".
-- Never commit directly to `master`, `dev`, or `release/X.Y.x` — create a
-  branch, test, open a PR.
-- Read-only git operations (status, diff, log) are always fine.
-- Show what will be committed before committing.
-
-### Worktrees
-
-Use worktrees to avoid disrupting another working directory:
-
-```bash
-mkdir -p ../Rocket.Chat.Electron-worktrees
-git worktree add ../Rocket.Chat.Electron-worktrees/feature-name -b new-branch dev
-```
-
-### Working Principles
-
-- **Understand before changing** — understand WHY code is written that way.
-  Working code is correct until proven otherwise. If unsure, ASK.
-- **Verify your work** — run tests, check types (`npx tsc --noEmit`),
-  demonstrate correctness. Never mark a task done without proving it works.
-- **Diagnose before iterating** — when approaches fail, analyze WHY before
-  trying the next one. Don't cycle through 3+ approaches blindly.
-- **Always verify libraries** — check official docs and `.d.ts` files in
-  `node_modules/`. Never assume props, tokens, or APIs work without
-  verification.
-- Verify work with the narrowest meaningful checks first, then broader checks
-  when risk or shared behavior justifies it.
-- If GitNexus tooling is available, use the GitNexus section below for
-  impact analysis and affected-scope checks. If it is unavailable, do not
-  block progress solely on that tool; compensate with local code search,
-  tests, and careful review.
-- Reindex GitNexus with `node .gitnexus/run.cjs analyze --index-only` and
-  only at quiet points: a plain `analyze` rewrites the gitnexus blocks in
-  `AGENTS.md`/`CLAUDE.md` (stats churn in tracked files), and a background
-  analyze mutates worktree git state — it can silently drop freshly staged
-  files from the index and touch watched sources, restarting a running
-  `yarn start` app mid-verification.
+- **Understand before you change.** Find out WHY the code is written that way.
+  Working code is correct until proven otherwise. If the reason is not in the
+  code, the history or the docs, and the change depends on it, ask.
+- **Check your work.** Run the tests and the type check (`npx tsc --noEmit`),
+  and show that the change works. Start with the narrowest meaningful check.
+  Broaden the checks when the risk or the shared behavior justifies it. Never
+  mark a task done before you prove that it works.
+- **Diagnose before you iterate.** When an approach fails, find WHY before you
+  try the next one. Do not cycle blindly through 3 or more approaches.
+- **Check libraries.** Read the official docs and the `.d.ts` files in
+  `node_modules/`, such as Fuselage's `Theme.d.ts` for color tokens. Never
+  assume that a prop, token or API works.
 
 ## Writing
 
-- Avoid subjective descriptors ("smart", "excellent", "dumb").
-- Use measurable descriptions: "reduced memory usage", "improved by X%".
-- Never invent metrics — no estimated time spent, no speculated user counts.
-  Only include numbers from actual logs, error messages, or documented
-  sources.
-- PR descriptions: straightforward language, focus on what changed and why.
+- Do not use subjective descriptors ("smart", "excellent", "dumb"). Use
+  measurable descriptions: "reduced memory usage", "improved by X%".
+- Never invent metrics: no estimated time spent, no speculated user counts.
+  Use only numbers from real logs, error messages or documented sources.
+- PR descriptions use straightforward language, and focus on what changed and
+  why.
 - PR descriptions and commit bodies are public. Do not include internal
-  references (Jira or Zoho Desk links and ticket text, customer names,
-  support conversations) or local developer tooling notes (GitNexus,
-  agent workflow, ledgers). A bare Jira key in the title or subject is
-  the accepted convention; everything else about the ticket stays
-  internal.
-
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
-
-This project is indexed by GitNexus as **Rocket.Chat.Electron**. Use the GitNexus MCP tools to understand code, assess impact, and navigate safely — read `gitnexus://repo/Rocket.Chat.Electron/context` for current index stats and staleness.
-
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
-
-## Always Do
-
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "dev"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
-
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/Rocket.Chat.Electron/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/Rocket.Chat.Electron/clusters` | All functional areas |
-| `gitnexus://repo/Rocket.Chat.Electron/processes` | All execution flows |
-| `gitnexus://repo/Rocket.Chat.Electron/process/{name}` | Step-by-step execution trace |
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->
+  references: Jira or Zoho Desk links and ticket text, customer names, support
+  conversations. Do not include notes about local developer tools either
+  (code indexers, agent workflow, ledgers). A bare Jira key at the end of the title
+  or subject is the accepted convention. Everything else about the ticket
+  stays internal.
+- Write instructions for agents (this file, nested `AGENTS.md` files, skills,
+  and the docs they link) in short active sentences: one instruction per
+  sentence, and no semicolons.
+- Write skills, agents, hooks and docs so that they work with no personal
+  tool. A contributor may not have your MCP servers, plugins, agents or
+  skills. Describe the action ("find every caller", "run it in the
+  background"). Name a personal tool only as an optional path, with a
+  fallback.

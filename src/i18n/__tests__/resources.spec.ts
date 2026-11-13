@@ -1,6 +1,19 @@
 import resources from '../resources';
 
 describe('i18n/resources', () => {
+  it.each(Object.keys(resources) as (keyof typeof resources)[])(
+    'provides the complete transparency restart dialog in %s',
+    async (language) => {
+      const resource = await resources[language]();
+      expect(resource.dialog.transparencyRestart).toEqual({
+        title: expect.stringMatching(/\S/),
+        message: expect.stringMatching(/\S/),
+        restartNow: expect.stringMatching(/\S/),
+        cancel: expect.stringMatching(/\S/),
+      });
+    }
+  );
+
   it('exposes loaders for all supported languages', () => {
     expect(Object.keys(resources).sort()).toEqual(
       [
@@ -12,6 +25,8 @@ describe('i18n/resources', () => {
         'hu',
         'it-IT',
         'ja',
+        'nb',
+        'nn',
         'no',
         'pl',
         'pt-BR',
@@ -21,8 +36,22 @@ describe('i18n/resources', () => {
         'uk-UA',
         'zh-CN',
         'zh-TW',
+        'zh',
       ].sort()
     );
+  });
+
+  it('loads the Norwegian and Chinese aliases from the main files', async () => {
+    const [no, nb, nn, zhCN, zh] = await Promise.all([
+      resources.no(),
+      resources.nb(),
+      resources.nn(),
+      resources['zh-CN'](),
+      resources.zh(),
+    ]);
+    expect(nb).toEqual(no);
+    expect(nn).toEqual(no);
+    expect(zh).toEqual(zhCN);
   });
 
   it('loads English resources as a non-empty object', async () => {

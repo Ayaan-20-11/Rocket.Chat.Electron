@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,6 +41,27 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.11.1'
+      - name: Setup node_modules cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            **/node_modules
+            .yarn/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-modules-${{ hashFiles('**/yarn.lock') }}
+      # The draft release body comes from `yarn conventional-changelog`, a dev
+      # dependency, so prepare needs the same install as the packaging jobs.
+      - name: Install package dependencies
+        run: yarn install
+      # Fails the release when an English key added since the previous release
+      # tag has no translation in a locale that the app loads. `yarn
+      # release:tag` runs the same check; this step also covers a tag pushed by
+      # hand. To release anyway, set the repository variable
+      # ALLOW_MISSING_TRANSLATIONS to 'true', re-run this job, and remove the
+      # variable after the release.
+      - name: Check translation coverage
+        env:
+          ALLOW_MISSING_TRANSLATIONS: ${{ vars.ALLOW_MISSING_TRANSLATIONS }}
+        run: yarn i18n:check-coverage
       - uses: ./workspaces/desktop-release-action
         with:
           mode: prepare
@@ -89,11 +110,13 @@ jobs:
             name: macos-mas
             targets: mas
             update_metadata: 'false'
-          - os: ubuntu-latest
+          # Pinned: on ubuntu-26.04 (ubuntu-latest since Nov 2026) rpmbuild fails
+          # in the rpm target. Unpin only after a dry run passes on the new image.
+          - os: ubuntu-24.04
             name: linux-appimage
             targets: AppImage deb rpm tar.gz
             update_metadata: 'true'
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             name: linux-snap
             targets: snap
             update_metadata: 'false'

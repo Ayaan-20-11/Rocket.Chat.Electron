@@ -3,13 +3,20 @@ import path from 'path';
 
 import archiver from 'archiver';
 import type { Event } from 'electron';
-import { app, BrowserWindow, screen, dialog, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  screen,
+  dialog,
+  shell,
+  nativeTheme,
+} from 'electron';
 import i18next from 'i18next';
 
 import { packageJsonInformation } from '../app/main/app';
 import { handle } from '../ipc/main';
 import { getHost } from '../logging/context';
-import { dispatch, select, watch } from '../store';
+import { dispatch, select } from '../store';
 import type { RootState } from '../store/rootReducer';
 import { LOG_VIEWER_WINDOW_OPEN_STATE_CHANGED } from '../ui/actions';
 import { getRootWindow } from '../ui/main/rootWindow';
@@ -21,11 +28,15 @@ import {
   watchWindowBounds,
 } from '../ui/main/secondaryWindowState';
 import {
+  isRecreatingSecondaryWindow,
+  watchSecondaryWindowTransparency,
+} from '../ui/main/secondaryWindowTransparency';
+import { getRootWindowAppearanceOptions } from '../ui/main/windowAppearance';
+import {
   NOT_FULL_SCREENABLE,
   getTitleBarOptions,
 } from '../ui/windowChrome/appearance';
 import {
-  TRANSPARENCY_CHANNEL,
   WINDOW_DEFAULT_HEIGHT,
   WINDOW_DEFAULT_WIDTH,
   WINDOW_MIN_HEIGHT,
@@ -88,6 +99,42 @@ const validateLogFilePath = (
   }
 
   return { valid: true };
+};
+
+type AuthorizedLogPathResult =
+  | { ok: true; logPath: string }
+  | { ok: false; error: string };
+
+/**
+ * Resolves the default log path, or an absolute `.log`/`.txt` path that is
+ * either the default or was previously picked through the file dialog.
+ */
+const resolveAuthorizedLogPath = (
+  filePath?: string
+): AuthorizedLogPathResult => {
+  if (!filePath) {
+    return { ok: true, logPath: getLogFilePath() };
+  }
+
+  const validation = validateLogFilePath(filePath);
+  if (!validation.valid) {
+    return { ok: false, error: validation.error ?? 'Invalid log file path' };
+  }
+
+  const normalizedPath = path.normalize(filePath);
+  const defaultLogPath = path.normalize(getLogFilePath());
+  if (
+    normalizedPath !== defaultLogPath &&
+    !allowedLogPaths.has(normalizedPath)
+  ) {
+    return {
+      ok: false,
+      error:
+        'Log file not authorized. Please select it via the file dialog first.',
+    };
+  }
+
+  return { ok: true, logPath: normalizedPath };
 };
 
 const LOG_ENTRY_REGEX = /^\[([^\]]+)\]\s+\[([^\]]+)\]/;
@@ -198,7 +245,7 @@ const buildLogViewerWindow = async (focusOnShow: boolean): Promise<void> => {
   // display nearest the main window.
   const savedBounds = getSavedWindowBounds('logViewer');
 
-  // Seeds the first paint only; the renderer then follows the setting live.
+  // Native appearance and the renderer must agree on the first paint.
   const isTransparencyEnabled = isMac && select(selectIsTransparencyEnabled);
 
   logViewerWindow = new BrowserWindow({
@@ -211,16 +258,12 @@ const buildLogViewerWindow = async (focusOnShow: boolean): Promise<void> => {
     // in-app one.
     ...getTitleBarOptions(),
     ...NOT_FULL_SCREENABLE,
-    // `transparent` cannot be toggled after creation, so — like the root window —
-    // the window is always transparent with a vibrancy material on macOS and the
-    // setting only decides whether the renderer paints an opaque surface over it.
-    // That is what lets the setting apply without reopening the window.
     ...(isMac
-      ? {
-          transparent: true,
-          vibrancy: 'sidebar' as const,
-          visualEffectState: 'active' as const,
-        }
+      ? getRootWindowAppearanceOptions({
+          platform: process.platform,
+          isTransparentWindowEnabled: isTransparencyEnabled,
+          shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
+        })
       : {}),
     webPreferences: {
       nodeIntegration: true,
@@ -236,7 +279,7 @@ const buildLogViewerWindow = async (focusOnShow: boolean): Promise<void> => {
 
   logViewerWindow.once('ready-to-show', () => {
     logViewerWindow?.setTitle(
-      `Log Viewer - ${packageJsonInformation.productName}`
+      `${t('logViewer.title')} - ${packageJsonInformation.productName}`
     );
     if (focusOnShow) {
       logViewerWindow?.show();
@@ -248,10 +291,11 @@ const buildLogViewerWindow = async (focusOnShow: boolean): Promise<void> => {
 
   dispatch({ type: LOG_VIEWER_WINDOW_OPEN_STATE_CHANGED, payload: true });
 
+  const openedWindow = logViewerWindow;
   logViewerWindow.on('closed', () => {
     logViewerWindow = null;
     allowedLogPaths.clear();
-    if (!isAppQuitting) {
+    if (!isAppQuitting && !isRecreatingSecondaryWindow(openedWindow)) {
       dispatch({
         type: LOG_VIEWER_WINDOW_OPEN_STATE_CHANGED,
         payload: false,
@@ -319,11 +363,11 @@ export const startLogViewerWindowHandler = (): void => {
     isAppQuitting = true;
   });
 
-  // Transparency is a renderer concern here, so a change only needs pushing to
-  // the open window — no reopen, no restart.
-  watch(selectIsTransparencyEnabled, (isEnabled) => {
-    if (!logViewerWindow || logViewerWindow.isDestroyed()) return;
-    logViewerWindow.webContents.send(TRANSPARENCY_CHANNEL, isEnabled);
+  watchSecondaryWindowTransparency({
+    getWindow: () => logViewerWindow,
+    reopen: () => createLogViewerWindow(false),
+    isQuitting: () => isAppQuitting,
+    waitForCreation: () => pendingCreation,
   });
 
   onWindowBoundsReset('logViewer', async () => {
@@ -381,28 +425,11 @@ export const startLogViewerWindowHandler = (): void => {
     'log-viewer-window/read-logs',
     async (_, options?: { filePath?: string; limit?: number | 'all' }) => {
       try {
-        let logPath: string;
-        if (options?.filePath) {
-          const validation = validateLogFilePath(options.filePath);
-          if (!validation.valid) {
-            return { success: false, error: validation.error };
-          }
-          const normalizedPath = path.normalize(options.filePath);
-          const defaultLogPath = path.normalize(getLogFilePath());
-          if (
-            normalizedPath !== defaultLogPath &&
-            !allowedLogPaths.has(normalizedPath)
-          ) {
-            return {
-              success: false,
-              error:
-                'Log file not authorized. Please select it via the file dialog first.',
-            };
-          }
-          logPath = normalizedPath;
-        } else {
-          logPath = getLogFilePath();
+        const resolved = resolveAuthorizedLogPath(options?.filePath);
+        if (!resolved.ok) {
+          return { success: false, error: resolved.error };
         }
+        const { logPath } = resolved;
         const limit = options?.limit;
 
         if (!(await pathExists(logPath))) {
@@ -457,28 +484,11 @@ export const startLogViewerWindowHandler = (): void => {
     'log-viewer-window/stat-log',
     async (_, options?: { filePath?: string }) => {
       try {
-        let logPath: string;
-        if (options?.filePath) {
-          const validation = validateLogFilePath(options.filePath);
-          if (!validation.valid) {
-            return { success: false, error: validation.error };
-          }
-          const normalizedPath = path.normalize(options.filePath);
-          const defaultLogPath = path.normalize(getLogFilePath());
-          if (
-            normalizedPath !== defaultLogPath &&
-            !allowedLogPaths.has(normalizedPath)
-          ) {
-            return {
-              success: false,
-              error:
-                'Log file not authorized. Please select it via the file dialog first.',
-            };
-          }
-          logPath = normalizedPath;
-        } else {
-          logPath = getLogFilePath();
+        const resolved = resolveAuthorizedLogPath(options?.filePath);
+        if (!resolved.ok) {
+          return { success: false, error: resolved.error };
         }
+        const { logPath } = resolved;
 
         if (!(await pathExists(logPath))) {
           return { success: false, error: 'Log file does not exist' };
@@ -501,28 +511,11 @@ export const startLogViewerWindowHandler = (): void => {
     'log-viewer-window/read-logs-tail',
     async (_, options: { fromByte: number; filePath?: string }) => {
       try {
-        let logPath: string;
-        if (options.filePath) {
-          const validation = validateLogFilePath(options.filePath);
-          if (!validation.valid) {
-            return { success: false, error: validation.error };
-          }
-          const normalizedPath = path.normalize(options.filePath);
-          const defaultLogPath = path.normalize(getLogFilePath());
-          if (
-            normalizedPath !== defaultLogPath &&
-            !allowedLogPaths.has(normalizedPath)
-          ) {
-            return {
-              success: false,
-              error:
-                'Log file not authorized. Please select it via the file dialog first.',
-            };
-          }
-          logPath = normalizedPath;
-        } else {
-          logPath = getLogFilePath();
+        const resolved = resolveAuthorizedLogPath(options.filePath);
+        if (!resolved.ok) {
+          return { success: false, error: resolved.error };
         }
+        const { logPath } = resolved;
 
         if (!(await pathExists(logPath))) {
           return { success: false, error: 'Log file does not exist' };
@@ -586,28 +579,11 @@ export const startLogViewerWindowHandler = (): void => {
     'log-viewer-window/reveal-log-file',
     async (_, options?: { filePath?: string }) => {
       try {
-        let logPath: string;
-        if (options?.filePath) {
-          const validation = validateLogFilePath(options.filePath);
-          if (!validation.valid) {
-            return { success: false, error: validation.error };
-          }
-          const normalizedPath = path.normalize(options.filePath);
-          const defaultLogPath = path.normalize(getLogFilePath());
-          if (
-            normalizedPath !== defaultLogPath &&
-            !allowedLogPaths.has(normalizedPath)
-          ) {
-            return {
-              success: false,
-              error:
-                'Log file not authorized. Please select it via the file dialog first.',
-            };
-          }
-          logPath = normalizedPath;
-        } else {
-          logPath = getLogFilePath();
+        const resolved = resolveAuthorizedLogPath(options?.filePath);
+        if (!resolved.ok) {
+          return { success: false, error: resolved.error };
         }
+        const { logPath } = resolved;
 
         if (!(await pathExists(logPath))) {
           return { success: false, error: 'Log file does not exist' };

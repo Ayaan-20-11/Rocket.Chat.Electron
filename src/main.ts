@@ -5,7 +5,6 @@ import {
   setupApp,
   initializeScreenCaptureFallbackState,
   setupGpuCrashHandler,
-  markMainWindowStable,
 } from './app/main/app';
 import {
   mergePersistableValues,
@@ -13,6 +12,7 @@ import {
 } from './app/main/data';
 import { setUserDataDirectory } from './app/main/dev';
 import { flushPersistedValues } from './app/main/persistence';
+import { setupTransparencyRestart } from './app/main/transparencyRestart';
 import { startBrowserHandler } from './browser/ipc';
 import { setupDeepLinks, processDeepLinksInArgs } from './deepLinks/main';
 import { startDocumentViewerHandler } from './documentViewer/ipc';
@@ -78,6 +78,7 @@ import {
 } from './ui/main/rootWindow';
 import { startSecondaryWindowControlsHandler } from './ui/main/secondaryWindowControls';
 import { attachGuestWebContentsEvents } from './ui/main/serverView';
+import { setupUiPreviewIpc } from './ui/main/serverView/uiPreview';
 import touchBar from './ui/main/touchBar';
 import trayIcon from './ui/main/trayIcon';
 import { setupUpdates } from './updates/main';
@@ -111,14 +112,21 @@ const start = async (): Promise<void> => {
   setUserDataDirectory();
   applySystemCertificates();
 
-  logger.info('Starting Rocket.Chat Desktop application');
+  logger.info(
+    'Starting Rocket.Chat Desktop application',
+    JSON.stringify({
+      version: app.getVersion(),
+      userData: app.getPath('userData'),
+      startHidden: app.commandLine.hasSwitch('start-hidden'),
+    })
+  );
 
   setupWebContentsLogging();
 
   performElectronStartup();
   setupDeepLinks();
 
-  // Set up GPU crash handler BEFORE whenReady to catch early GPU failures
+  // BEFORE whenReady so early GPU failures are caught
   setupGpuCrashHandler();
 
   await app.whenReady();
@@ -134,10 +142,8 @@ const start = async (): Promise<void> => {
   setupOutlookLogger();
   setupDebugLoggingWatch();
 
-  // Initialize screen capture fallback state after store is available
   initializeScreenCaptureFallbackState();
 
-  // Set up electron-dl with our download tracking callbacks
   setupElectronDlWithTracking();
 
   const localStorage = await exportLocalStorage();
@@ -148,16 +154,16 @@ const start = async (): Promise<void> => {
   await i18n.wait();
 
   setupApp();
+  setupTransparencyRestart();
 
   setupMainErrorHandling();
 
   createRootWindow();
   startOutlookCalendarUrlHandler();
   attachGuestWebContentsEvents();
+  setupUiPreviewIpc();
   await showRootWindow();
 
-  // Mark main window as stable - GPU crashes after this won't trigger fallback
-  markMainWindowStable();
   watchMachineTheme();
   setupNotifications();
   attentionDrawing.setUp();
